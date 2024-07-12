@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mindspore Donut Swin Transformer model.
+"""PyTorch Donut Swin Transformer model.
 
 This implementation is identical to a regular Swin Transformer, without final layer norm on top of the final hidden
 states."""
@@ -24,14 +24,14 @@ from typing import Optional, Tuple, Union
 
 import mindspore as ms
 from mindspore import nn, ops, Parameter
-from mindspore.common.initializer import Normal, initializer
+from mindspore.common.initializer import initializer, Normal
 
 from ...activations import ACT2FN
 from ...modeling_utils import PreTrainedModel
 from ...ms_utils import find_pruneable_heads_and_indices, meshgrid, prune_linear_layer
 from ....utils import (
     ModelOutput,
-    logging,
+    logging
 )
 from .configuration_donut_swin import DonutSwinConfig
 
@@ -153,15 +153,15 @@ class DonutSwinEmbeddings(nn.Cell):
         self.patch_embeddings = DonutSwinPatchEmbeddings(config)
         num_patches = self.patch_embeddings.num_patches
         self.patch_grid = self.patch_embeddings.grid_size
-        self.mask_token = Parameter(ops.zeros((1, 1, config.embed_dim)), name="mask_token") if use_mask_token else None
+        self.mask_token = Parameter(ops.zeros(1, 1, config.embed_dim),'mask_token') if use_mask_token else None
 
         if config.use_absolute_embeddings:
-            self.position_embeddings = Parameter(ops.zeros((1, num_patches + 1, config.embed_dim)), name="position_embeddings")
+            self.position_embeddings = Parameter(ops.zeros(1, num_patches + 1, config.embed_dim),'position_embeddings')
         else:
             self.position_embeddings = None
 
         self.norm = nn.LayerNorm([config.embed_dim])
-        self.dropout = nn.Dropout(p=config.hidden_dropout_prob)
+        self.dropout = nn.Dropout(p = config.hidden_dropout_prob)
 
     def interpolate_pos_encoding(self, embeddings: ms.Tensor, height: int, width: int) -> ms.Tensor:
         """
@@ -191,6 +191,7 @@ class DonutSwinEmbeddings(nn.Cell):
             scale_factor=(h0 / math.sqrt(num_positions), w0 / math.sqrt(num_positions)),
             mode="bicubic",
             align_corners=False,
+            recompute_scale_factor=True
         )
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return ops.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), axis=1)
@@ -201,7 +202,6 @@ class DonutSwinEmbeddings(nn.Cell):
         bool_masked_pos: Optional[ms.Tensor] = None,
         interpolate_pos_encoding: bool = False,
     ) -> Tuple[ms.Tensor]:
-
         _, num_channels, height, width = pixel_values.shape
         embeddings, output_dimensions = self.patch_embeddings(pixel_values)
         embeddings = self.norm(embeddings)
@@ -210,7 +210,7 @@ class DonutSwinEmbeddings(nn.Cell):
         if bool_masked_pos is not None:
             mask_tokens = self.mask_token.broadcast_to((batch_size, seq_len, -1))
             # replace the masked visual tokens by mask_tokens
-            mask = bool_masked_pos.unsqueeze(-1).to(mask_tokens.dtype)
+            mask = bool_masked_pos.unsqueeze(-1).type_as(mask_tokens)
             embeddings = embeddings * (1.0 - mask) + mask_tokens * mask
 
         if self.position_embeddings is not None:
@@ -245,8 +245,7 @@ class DonutSwinPatchEmbeddings(nn.Cell):
         self.num_patches = num_patches
         self.grid_size = (image_size[0] // patch_size[0], image_size[1] // patch_size[1])
 
-        self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size,
-                                    padding=0, pad_mode='valid', has_bias=True)
+        self.projection = nn.Conv2d(num_channels, hidden_size, kernel_size=patch_size, stride=patch_size, has_bias=True)
 
     def maybe_pad(self, pixel_values, height, width):
         if width % self.patch_size[1] != 0:
@@ -264,7 +263,7 @@ class DonutSwinPatchEmbeddings(nn.Cell):
         embeddings = self.projection(pixel_values)
         _, _, height, width = embeddings.shape
         output_dimensions = (height, width)
-        embeddings = ops.flatten(embeddings, start_dim=2).swapaxes(1, 2)
+        embeddings = embeddings.flatten(start_dim=2).swapaxes(1, 2)
 
         return embeddings, output_dimensions
 
@@ -315,7 +314,7 @@ class DonutSwinPatchMerging(nn.Cell):
         # [batch_size, height/2, width/2, num_channels]
         input_feature_3 = input_feature[:, 1::2, 1::2, :]
         # batch_size height/2 width/2 4*num_channels
-        input_feature = ops.cat([input_feature_0, input_feature_1, input_feature_2, input_feature_3], axis=-1)
+        input_feature = ops.cat([input_feature_0, input_feature_1, input_feature_2, input_feature_3], -1)
         input_feature = input_feature.view(batch_size, -1, 4 * num_channels)  # batch_size height/2*width/2 4*C
 
         input_feature = self.norm(input_feature)
@@ -340,7 +339,7 @@ def drop_path(input: ms.Tensor, drop_prob: float = 0.0, training: bool = False) 
     keep_prob = 1 - drop_prob
     shape = (input.shape[0],) + (1,) * (input.ndim - 1)  # work with diff dim tensors, not just 2D ConvNets
     random_tensor = keep_prob + ops.rand(shape, dtype=input.dtype)
-    random_tensor = ops.floor(random_tensor)  # binarize
+    random_tensor.floor()  # binarize
     output = input.div(keep_prob) * random_tensor
     return output
 
@@ -377,7 +376,8 @@ class DonutSwinSelfAttention(nn.Cell):
         )
 
         self.relative_position_bias_table = Parameter(
-            ops.zeros(((2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1), num_heads)), name="relative_position_bias_table"
+            ops.zeros((2 * self.window_size[0] - 1) * (2 * self.window_size[1] - 1), num_heads),
+            'relative_position_bias_table'
         )
 
         # get pair-wise relative position index for each token inside the window
@@ -397,7 +397,7 @@ class DonutSwinSelfAttention(nn.Cell):
         self.key = nn.Dense(self.all_head_size, self.all_head_size, has_bias=config.qkv_bias)
         self.value = nn.Dense(self.all_head_size, self.all_head_size, has_bias=config.qkv_bias)
 
-        self.dropout = nn.Dropout(p=config.attention_probs_dropout_prob)
+        self.dropout = nn.Dropout(p = config.attention_probs_dropout_prob)
 
     def transpose_for_scores(self, x):
         new_x_shape = x.shape[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -466,7 +466,7 @@ class DonutSwinSelfOutput(nn.Cell):
     def __init__(self, config, dim):
         super().__init__()
         self.dense = nn.Dense(dim, dim)
-        self.dropout = nn.Dropout(p=config.attention_probs_dropout_prob)
+        self.dropout = nn.Dropout(p = config.attention_probs_dropout_prob)
 
     def construct(self, hidden_states: ms.Tensor, input_tensor: ms.Tensor) -> ms.Tensor:
         hidden_states = self.dense(hidden_states)
@@ -535,7 +535,7 @@ class DonutSwinOutput(nn.Cell):
     def __init__(self, config, dim):
         super().__init__()
         self.dense = nn.Dense(int(config.mlp_ratio * dim), dim)
-        self.dropout = nn.Dropout(p=config.hidden_dropout_prob)
+        self.dropout = nn.Dropout(p = config.hidden_dropout_prob)
 
     def construct(self, hidden_states: ms.Tensor) -> ms.Tensor:
         hidden_states = self.dense(hidden_states)
@@ -551,10 +551,10 @@ class DonutSwinLayer(nn.Cell):
         self.shift_size = shift_size
         self.window_size = config.window_size
         self.input_resolution = input_resolution
-        self.layernorm_before = nn.LayerNorm([dim], epsilon=config.layer_norm_eps)
+        self.layernorm_before = nn.LayerNorm(dim, epsilon=config.layer_norm_eps)
         self.attention = DonutSwinAttention(config, dim, num_heads, window_size=self.window_size)
         self.drop_path = DonutSwinDropPath(config.drop_path_rate) if config.drop_path_rate > 0.0 else nn.Identity()
-        self.layernorm_after = nn.LayerNorm([dim], epsilon=config.layer_norm_eps)
+        self.layernorm_after = nn.LayerNorm(dim, epsilon=config.layer_norm_eps)
         self.intermediate = DonutSwinIntermediate(config, dim)
         self.output = DonutSwinOutput(config, dim)
 
@@ -625,9 +625,7 @@ class DonutSwinLayer(nn.Cell):
         _, height_pad, width_pad, _ = hidden_states.shape
         # cyclic shift
         if self.shift_size > 0:
-            shifted_hidden_states = ms.numpy.roll(hidden_states, shift=(-self.shift_size, -self.shift_size), axis=(1, 2))
-            # shifted_hidden_states = ops.roll(hidden_states, shifts=-self.shift_size, dims=1)
-            # shifted_hidden_states = ops.roll(shifted_hidden_states, shifts=-self.shift_size, dims=2)
+            shifted_hidden_states = ms.Tensor(ms.numpy.roll(hidden_states, shift=(-self.shift_size, -self.shift_size), axis=(1, 2)))
         else:
             shifted_hidden_states = hidden_states
 
@@ -649,9 +647,8 @@ class DonutSwinLayer(nn.Cell):
 
         # reverse cyclic shift
         if self.shift_size > 0:
-            attention_windows = ms.numpy.roll(shifted_windows, shift=(self.shift_size, self.shift_size), axis=(1, 2))
-            # attention_windows = ops.roll(shifted_windows, shifts=self.shift_size, dims=1)
-            # attention_windows = ops.roll(attention_windows, shifts=self.shift_size, dims=2)
+            # attention_windows = torch.roll(shifted_windows, shifts=(self.shift_size, self.shift_size), dims=(1, 2))4
+            attention_windows = ms.Tensor(ms.numpy.roll(shifted_windows, shift=(self.shift_size, self.shift_size), axis=(1, 2)))
         else:
             attention_windows = shifted_windows
 
@@ -706,7 +703,6 @@ class DonutSwinStage(nn.Cell):
         output_attentions: Optional[bool] = False,
         always_partition: Optional[bool] = False,
     ) -> Tuple[ms.Tensor]:
-
         height, width = input_dimensions
         for i, layer_module in enumerate(self.blocks):
             layer_head_mask = head_mask[i] if head_mask is not None else None
@@ -767,7 +763,6 @@ class DonutSwinEncoder(nn.Cell):
         always_partition: Optional[bool] = False,
         return_dict: Optional[bool] = True,
     ) -> Union[Tuple, DonutSwinEncoderOutput]:
-
         all_hidden_states = () if output_hidden_states else None
         all_reshaped_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -848,18 +843,54 @@ class DonutSwinPreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["DonutSwinStage"]
 
-    def _init_weights(self, module):
+    def _init_weights(self, cell):
         """Initialize the weights"""
-        if isinstance(module, (nn.Dense, nn.Conv2d)):
+        if isinstance(cell, (nn.Dense, nn.Conv2d)):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.set_data(initializer(Normal(sigma=self.config.initializer_range),
-                                             module.weight.shape, module.weight.dtype))
-            if module.has_bias:
-                module.bias.set_data(initializer('zeros', module.bias.shape, module.bias.dtype))
-        elif isinstance(module, nn.LayerNorm):
-            module.weight.set_data(initializer('ones', module.weight.shape, module.weight.dtype))
-            module.bias.set_data(initializer('zeros', module.bias.shape, module.bias.dtype))
+            cell.weight.set_data(initializer(Normal(mean=0.0, sigma=self.config.initializer_range),
+                                             cell.weight.shape, cell.weight.dtype))
+            if cell.bias is not None:
+                cell.bias.set_data(initializer('zeros', cell.bias.shape, cell.bias.dtype))
+        elif isinstance(cell, nn.LayerNorm):
+            cell.bias.set_data(initializer('zeros', cell.bias.shape, cell.bias.dtype))
+            cell.weight.set_data(initializer('ones', cell.weight.shape, cell.weight.dtype))
+
+
+SWIN_START_DOCSTRING = r"""
+    This model is a PyTorch [torch.nn.Module](https://pytorch.org/docs/stable/nn.html#torch.nn.Module) sub-class. Use
+    it as a regular PyTorch Module and refer to the PyTorch documentation for all matter related to general usage and
+    behavior.
+
+    Parameters:
+        config ([`DonutSwinConfig`]): Model configuration class with all the parameters of the model.
+            Initializing with a config file does not load the weights associated with the model, only the
+            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
+"""
+
+SWIN_INPUTS_DOCSTRING = r"""
+    Args:
+        pixel_values (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)`):
+            Pixel values. Pixel values can be obtained using [`AutoImageProcessor`]. See
+            [`DonutImageProcessor.__call__`] for details.
+        head_mask (`torch.FloatTensor` of shape `(num_heads,)` or `(num_layers, num_heads)`, *optional*):
+            Mask to nullify selected heads of the self-attention modules. Mask values selected in `[0, 1]`:
+
+            - 1 indicates the head is **not masked**,
+            - 0 indicates the head is **masked**.
+
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under returned
+            tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors for
+            more detail.
+        interpolate_pos_encoding (`bool`, *optional*, defaults to `False`):
+            Whether to interpolate the pre-trained position encodings.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+"""
+
 
 
 class DonutSwinModel(DonutSwinPreTrainedModel):
@@ -887,6 +918,7 @@ class DonutSwinModel(DonutSwinPreTrainedModel):
         """
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
+
 
     def construct(
         self,
@@ -951,8 +983,4 @@ class DonutSwinModel(DonutSwinPreTrainedModel):
             reshaped_hidden_states=encoder_outputs.reshaped_hidden_states,
         )
 
-
-__all__ = [
-    "DonutSwinModel",
-    "DonutSwinPreTrainedModel",
-]
+__all__ = ['DonutSwinPreTrainedModel','DonutSwinModel']

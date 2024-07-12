@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 Huawei Technologies Co., Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,18 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Testing suite for the Mindspore TrOCR model."""
+"""Testing suite for the PyTorch TrOCR model."""
 
 import unittest
-import numpy as np
 
+import numpy as np
 from mindnlp.transformers import TrOCRConfig
 from mindnlp.utils.testing_utils import is_mindspore_available, require_mindspore
 
 from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, ids_tensor
-
 
 if is_mindspore_available():
     from mindspore import ops
@@ -34,26 +33,26 @@ if is_mindspore_available():
 @require_mindspore
 class TrOCRStandaloneDecoderModelTester:
     def __init__(
-        self,
-        parent,
-        vocab_size=99,
-        batch_size=13,
-        d_model=16,
-        decoder_seq_length=7,
-        is_training=True,
-        is_decoder=True,
-        use_attention_mask=True,
-        use_cache=False,
-        use_labels=True,
-        decoder_start_token_id=2,
-        decoder_ffn_dim=32,
-        decoder_layers=2,
-        decoder_attention_heads=4,
-        max_position_embeddings=30,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-        scope=None,
+            self,
+            parent,
+            vocab_size=99,
+            batch_size=13,
+            d_model=16,
+            decoder_seq_length=7,
+            is_training=True,
+            is_decoder=True,
+            use_attention_mask=True,
+            use_cache=False,
+            use_labels=True,
+            decoder_start_token_id=2,
+            decoder_ffn_dim=32,
+            decoder_layers=2,
+            decoder_attention_heads=4,
+            max_position_embeddings=30,
+            pad_token_id=0,
+            bos_token_id=1,
+            eos_token_id=2,
+            scope=None,
     ):
         self.parent = parent
         self.batch_size = batch_size
@@ -109,14 +108,14 @@ class TrOCRStandaloneDecoderModelTester:
             max_position_embeddings=self.max_position_embeddings,
         )
 
-        return (config, input_ids, attention_mask, lm_labels)
+        return config, input_ids, attention_mask, lm_labels
 
     def create_and_check_decoder_model_past(
-        self,
-        config,
-        input_ids,
-        attention_mask,
-        lm_labels,
+            self,
+            config,
+            input_ids,
+            attention_mask,
+            lm_labels,
     ):
         config.use_cache = True
         model = TrOCRDecoder(config=config).set_train(False)
@@ -160,7 +159,7 @@ class TrOCRStandaloneDecoderModelTester:
 
 @require_mindspore
 class TrOCRStandaloneDecoderModelTest(ModelTesterMixin, GenerationTesterMixin, unittest.TestCase):
-    all_model_classes = (TrOCRDecoder, TrOCRForCausalLM) if is_mindspore_available() else ()
+    all_model_classes = (TrOCRForCausalLM, ) if is_mindspore_available() else ()
     all_generative_model_classes = (TrOCRForCausalLM,) if is_mindspore_available() else ()
     pipeline_model_mapping = {"text-generation": TrOCRForCausalLM} if is_mindspore_available() else {}
     fx_compatible = True
@@ -174,11 +173,11 @@ class TrOCRStandaloneDecoderModelTest(ModelTesterMixin, GenerationTesterMixin, u
     def test_inputs_embeds(self):
         pass
 
-    # trocr has no base model
+    # TrOCR has no base model
     def test_save_load_fast_init_from_base(self):
         pass
 
-    # trocr has no base model
+    # TrOCR has no base model
     def test_save_load_fast_init_to_base(self):
         pass
 

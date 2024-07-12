@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Testing suite for the Mindspore Donut Swin model."""
+"""Testing suite for the PyTorch Donut Swin model."""
 
 import collections
 import unittest
@@ -142,7 +142,6 @@ class DonutSwinModelTester:
 @require_mindspore
 class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (DonutSwinModel,) if is_mindspore_available() else ()
-    pipeline_model_mapping = {"image-feature-extraction": DonutSwinModel} if is_mindspore_available() else {}
     fx_compatible = True
 
     test_pruning = False
@@ -151,25 +150,28 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
 
     def setUp(self):
         self.model_tester = DonutSwinModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=DonutSwinConfig, embed_dim=37)
+        # self.config_tester = ConfigTester(self, config_class=DonutSwinConfig, embed_dim=37)
+        self.config_tester = ConfigTester(
+            self,
+            config_class=DonutSwinConfig,
+            has_text_modality=False,
+            embed_dim=37,
+            common_properties=["image_size", "patch_size", "num_channels"],
+        )
 
     def test_config(self):
         self.config_tester.create_and_test_config_to_json_string()
-        self.config_tester.create_and_test_config_to_json_file()
-        self.config_tester.create_and_test_config_from_and_save_pretrained()
-        self.config_tester.create_and_test_config_with_num_labels()
-        self.config_tester.check_config_can_be_init_without_params()
-        self.config_tester.check_config_arguments_init()
+        self.config_tester.run_common_tests()
 
     def test_model(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
         self.model_tester.create_and_check_model(*config_and_inputs)
 
+    @unittest.skip(reason="DonutSwin does not use inputs_embeds")
     def test_inputs_embeds(self):
-        # DonutSwin does not use inputs_embeds
         pass
 
-    def test_model_get_set_embeddings(self):
+    def test_model_common_attributes(self):
         config, _ = self.model_tester.prepare_config_and_inputs_for_common()
 
         for model_class in self.all_model_classes:
@@ -177,6 +179,10 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
             self.assertIsInstance(model.get_input_embeddings(), (nn.Cell))
             x = model.get_output_embeddings()
             self.assertTrue(x is None or isinstance(x, nn.Dense))
+
+    @unittest.skip(reason="DonutSwin does not output any loss term in the forward pass")
+    def test_training(self):
+        pass
 
     def test_attention_outputs(self):
         config, inputs_dict = self.model_tester.prepare_config_and_inputs_for_common()
@@ -188,6 +194,7 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
             config.return_dict = True
             model = model_class(config)
             model.set_train(False)
+
             outputs = model(**self._prepare_for_class(inputs_dict, model_class))
             attentions = outputs.attentions
             expected_num_attentions = len(self.model_tester.depths)
@@ -199,6 +206,7 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
             window_size_squared = config.window_size**2
             model = model_class(config)
             model.set_train(False)
+
             outputs = model(**self._prepare_for_class(inputs_dict, model_class))
             attentions = outputs.attentions
             self.assertEqual(len(attentions), expected_num_attentions)
@@ -214,6 +222,7 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
             inputs_dict["output_hidden_states"] = True
             model = model_class(config)
             model.set_train(False)
+
             outputs = model(**self._prepare_for_class(inputs_dict, model_class))
 
             if hasattr(self.model_tester, "num_hidden_states_types"):
@@ -234,7 +243,9 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
 
     def check_hidden_states_output(self, inputs_dict, config, model_class, image_size):
         model = model_class(config)
+
         model.set_train(False)
+
 
         outputs = model(**self._prepare_for_class(inputs_dict, model_class))
 
@@ -316,10 +327,6 @@ class DonutSwinModelTest(ModelTesterMixin, unittest.TestCase):
             del inputs_dict["output_hidden_states"]
             config.output_hidden_states = True
             self.check_hidden_states_output(inputs_dict, config, model_class, (padded_height, padded_width))
-
-    @unittest.skip(reason="DonutSwinModel does not support input and output embeddings")
-    def test_model_common_attributes(self):
-        pass
 
     @slow
     def test_model_from_pretrained(self):

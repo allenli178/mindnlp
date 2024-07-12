@@ -17,8 +17,8 @@
 from typing import Dict, List, Optional, Union
 
 import numpy as np
+from mindnlp.utils import TensorType, logging, is_vision_available
 
-from mindnlp.configs import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from ...image_processing_utils import BaseImageProcessor, BatchFeature, get_size_dict
 from ...image_transforms import (
     get_resize_output_image_size,
@@ -26,6 +26,10 @@ from ...image_transforms import (
     resize,
     to_channel_dimension_format,
     to_pil_image,
+)
+from ....configs import (
+    IMAGENET_DEFAULT_MEAN,
+    IMAGENET_DEFAULT_STD,
 )
 from ...image_utils import (
     ChannelDimension,
@@ -40,8 +44,6 @@ from ...image_utils import (
     validate_kwargs,
     validate_preprocess_arguments,
 )
-from ....utils import TensorType, logging
-from ....utils.import_utils import is_vision_available
 
 
 logger = logging.get_logger(__name__)
@@ -119,7 +121,9 @@ class NougatImageProcessor(BaseImageProcessor):
         self.do_rescale = do_rescale
         self.rescale_factor = rescale_factor
         self.do_normalize = do_normalize
-        self.image_mean = image_mean if image_mean is not None else IMAGENET_DEFAULT_MEAN
+        self.image_mean = (
+            image_mean if image_mean is not None else IMAGENET_DEFAULT_MEAN
+        )
         self.image_std = image_std if image_std is not None else IMAGENET_DEFAULT_STD
         self._valid_processor_keys = [
             "images",
@@ -199,10 +203,14 @@ class NougatImageProcessor(BaseImageProcessor):
         x_min, y_min, width, height = self.python_bounding_rect(coords)
         image = image.crop((x_min, y_min, x_min + width, y_min + height))
         image = np.array(image).astype(np.uint8)
-        image = to_channel_dimension_format(image, input_data_format, ChannelDimension.LAST)
+        image = to_channel_dimension_format(
+            image, input_data_format, ChannelDimension.LAST
+        )
 
         image = (
-            to_channel_dimension_format(image, data_format, input_data_format) if data_format is not None else image
+            to_channel_dimension_format(image, data_format, input_data_format)
+            if data_format is not None
+            else image
         )
 
         return image
@@ -240,7 +248,9 @@ class NougatImageProcessor(BaseImageProcessor):
             image = np.rot90(image, 3)
 
         if data_format is not None:
-            image = to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format)
+            image = to_channel_dimension_format(
+                image, data_format, input_channel_dim=input_data_format
+            )
 
         return image
 
@@ -277,7 +287,9 @@ class NougatImageProcessor(BaseImageProcessor):
         pad_right = delta_width - pad_left
 
         padding = ((pad_top, pad_bottom), (pad_left, pad_right))
-        return pad(image, padding, data_format=data_format, input_data_format=input_data_format)
+        return pad(
+            image, padding, data_format=data_format, input_data_format=input_data_format
+        )
 
     # Copied from transformers.models.donut.image_processing_donut.DonutImageProcessor.thumbnail
     def thumbnail(
@@ -358,7 +370,10 @@ class NougatImageProcessor(BaseImageProcessor):
         size = get_size_dict(size)
         shortest_edge = min(size["height"], size["width"])
         output_size = get_resize_output_image_size(
-            image, size=shortest_edge, default_to_square=False, input_data_format=input_data_format
+            image,
+            size=shortest_edge,
+            default_to_square=False,
+            input_data_format=input_data_format,
         )
         resized_image = resize(
             image,
@@ -441,22 +456,33 @@ class NougatImageProcessor(BaseImageProcessor):
                 - `"channels_last"` or `ChannelDimension.LAST`: image in (height, width, num_channels) format.
                 - `"none"` or `ChannelDimension.NONE`: image in (height, width) format.
         """
-        do_crop_margin = do_crop_margin if do_crop_margin is not None else self.do_crop_margin
+        do_crop_margin = (
+            do_crop_margin if do_crop_margin is not None else self.do_crop_margin
+        )
         do_resize = do_resize if do_resize is not None else self.do_resize
         size = size if size is not None else self.size
         resample = resample if resample is not None else self.resample
         do_thumbnail = do_thumbnail if do_thumbnail is not None else self.do_thumbnail
-        do_align_long_axis = do_align_long_axis if do_align_long_axis is not None else self.do_align_long_axis
+        do_align_long_axis = (
+            do_align_long_axis
+            if do_align_long_axis is not None
+            else self.do_align_long_axis
+        )
         do_pad = do_pad if do_pad is not None else self.do_pad
         do_rescale = do_rescale if do_rescale is not None else self.do_rescale
-        rescale_factor = rescale_factor if rescale_factor is not None else self.rescale_factor
+        rescale_factor = (
+            rescale_factor if rescale_factor is not None else self.rescale_factor
+        )
         do_normalize = do_normalize if do_normalize is not None else self.do_normalize
         image_mean = image_mean if image_mean is not None else self.image_mean
         image_std = image_std if image_std is not None else self.image_std
 
         images = make_list_of_images(images)
 
-        validate_kwargs(captured_kwargs=kwargs.keys(), valid_processor_keys=self._valid_processor_keys)
+        validate_kwargs(
+            captured_kwargs=kwargs.keys(),
+            valid_processor_keys=self._valid_processor_keys,
+        )
 
         if not valid_images(images):
             raise ValueError(
@@ -490,43 +516,76 @@ class NougatImageProcessor(BaseImageProcessor):
             input_data_format = infer_channel_dimension_format(images[0])
 
         if do_crop_margin:
-            images = [self.crop_margin(image, input_data_format=input_data_format) for image in images]
+            images = [
+                self.crop_margin(image, input_data_format=input_data_format)
+                for image in images
+            ]
 
         if do_align_long_axis:
-            images = [self.align_long_axis(image, size=size, input_data_format=input_data_format) for image in images]
+            images = [
+                self.align_long_axis(
+                    image, size=size, input_data_format=input_data_format
+                )
+                for image in images
+            ]
 
         if do_resize:
             images = [
-                self.resize(image=image, size=size, resample=resample, input_data_format=input_data_format)
+                self.resize(
+                    image=image,
+                    size=size,
+                    resample=resample,
+                    input_data_format=input_data_format,
+                )
                 for image in images
             ]
 
         if do_thumbnail:
-            images = [self.thumbnail(image=image, size=size, input_data_format=input_data_format) for image in images]
+            images = [
+                self.thumbnail(
+                    image=image, size=size, input_data_format=input_data_format
+                )
+                for image in images
+            ]
 
         if do_pad:
-            images = [self.pad_image(image=image, size=size, input_data_format=input_data_format) for image in images]
+            images = [
+                self.pad_image(
+                    image=image, size=size, input_data_format=input_data_format
+                )
+                for image in images
+            ]
 
         if do_rescale:
             images = [
-                self.rescale(image=image, scale=rescale_factor, input_data_format=input_data_format)
+                self.rescale(
+                    image=image,
+                    scale=rescale_factor,
+                    input_data_format=input_data_format,
+                )
                 for image in images
             ]
 
         if do_normalize:
             images = [
-                self.normalize(image=image, mean=image_mean, std=image_std, input_data_format=input_data_format)
+                self.normalize(
+                    image=image,
+                    mean=image_mean,
+                    std=image_std,
+                    input_data_format=input_data_format,
+                )
                 for image in images
             ]
 
         images = [
-            to_channel_dimension_format(image, data_format, input_channel_dim=input_data_format) for image in images
+            to_channel_dimension_format(
+                image, data_format, input_channel_dim=input_data_format
+            )
+            for image in images
         ]
 
         data = {"pixel_values": images}
         return BatchFeature(data=data, tensor_type=return_tensors)
 
 
-__all__=[
-    "NougatImageProcessor"
-]
+__all__ = ["NougatImageProcessor"]

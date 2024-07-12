@@ -1,4 +1,4 @@
-# Copyright 2022 The HuggingFace Team. All rights reserved.
+# Copyright 2023 The HuggingFace Team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-model Nougat init
+Nougat Model init
 """
 
 from . import image_processing_nougat, processing_nougat, tokenization_nougat_fast
-
 from .image_processing_nougat import *
 from .processing_nougat import *
 from .tokenization_nougat_fast import *
+
 
 __all__ = []
 __all__.extend(image_processing_nougat.__all__)

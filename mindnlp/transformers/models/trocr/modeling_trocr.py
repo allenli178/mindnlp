@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Fairseq Authors and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 Huawei Technologies Co., Ltd
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,32 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Mindspore TrOCR decoder model (based on RoBERTa)."""
+"""MindSpore TrOCR decoder model."""
 
 import copy
 import math
 from typing import Optional, Tuple, Union
-import numpy as np
 
-import mindspore as ms
+import numpy as np
+import mindspore
 from mindspore import nn, ops
-from mindspore.common.initializer import initializer, Normal
+from mindspore.common.initializer import (initializer, Normal)
+from mindspore.ops import cross_entropy
+from mindnlp.utils import logging
 
 from ...activations import ACT2FN
-from ...modeling_attn_mask_utils import _prepare_4d_attention_mask, _prepare_4d_causal_attention_mask
-from ...modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, CausalLMOutputWithCrossAttentions
+from ...modeling_attn_mask_utils import _prepare_4d_attention_mask, \
+    _prepare_4d_causal_attention_mask
+from ...modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, \
+    CausalLMOutputWithCrossAttentions
 from ...modeling_utils import PreTrainedModel
-from ....utils import logging
 from .configuration_trocr import TrOCRConfig
-
 
 logger = logging.get_logger(__name__)
 
-_CONFIG_FOR_DOC = "TrOCRConfig"
-_CHECKPOINT_FOR_DOC = "microsoft/trocr-base-handwritten"
 
-
-# Copied from transformers.models.bart.modeling_bart.BartLearnedPositionalEmbedding with Bart->TrOCR
 class TrOCRLearnedPositionalEmbedding(nn.Embedding):
     """
     This module learns positional embeddings up to a fixed maximum size.
@@ -49,29 +47,29 @@ class TrOCRLearnedPositionalEmbedding(nn.Embedding):
         self.offset = 2
         super().__init__(num_embeddings + self.offset, embedding_dim)
 
-    def construct(self, input_ids: ms.Tensor, past_key_values_length: int = 0):
+    def construct(self, ids: mindspore.Tensor, past_key_values_length: int = 0):
         """`input_ids' shape is expected to be [bsz x seqlen]."""
 
-        bsz, seq_len = input_ids.shape[:2]
+        bsz, seq_len = ids.shape[:2]
         positions = ops.arange(
-            past_key_values_length, past_key_values_length + seq_len, dtype=ms.int64
-        ).broadcast_to((bsz, -1))
+            past_key_values_length, past_key_values_length + seq_len, dtype=mindspore.int64
+        ).expand(bsz, -1)
 
         return super().construct(positions + self.offset)
 
 
-# Copied from transformers.models.bart.modeling_bart.BartScaledWordEmbedding with Bart->TrOCR
 class TrOCRScaledWordEmbedding(nn.Embedding):
     """
     This module overrides nn.Embeddings' forward by multiplying with embeddings scale.
     """
 
-    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int, embed_scale: Optional[float] = 1.0):
-        super().__init__(num_embeddings, embedding_dim, padding_idx)
+    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: int,
+                 embed_scale: Optional[float] = 1.0):
+        super().__init__(num_embeddings, embedding_dim, padding_idx=padding_idx)
         self.embed_scale = embed_scale
 
-    def construct(self, input_ids: ms.Tensor):
-        return super().construct(input_ids) * self.embed_scale
+    def construct(self, ids: mindspore.Tensor):
+        return super().construct(ids) * self.embed_scale
 
 
 class TrOCRSinusoidalPositionalEmbedding(nn.Cell):
@@ -83,31 +81,34 @@ class TrOCRSinusoidalPositionalEmbedding(nn.Cell):
         self.embedding_dim = embedding_dim
         self.padding_idx = padding_idx
         self.weights = self.get_embedding(num_positions, embedding_dim, padding_idx)
-        self._float_tensor = ms.tensor(1, dtype=ms.float32)
+        self._float_tensor = mindspore.Tensor(1)
 
     @staticmethod
     def get_embedding(num_embeddings: int, embedding_dim: int, padding_idx: Optional[int] = None):
         """
-        Build sinusoidal embeddings. This matches the implementation in tensor2tensor, but differs slightly from the
+        Build sinusoidal embeddings. This matches the implementation in tensor2tensor,
+        but differs slightly from the
         description in Section 3.5 of "Attention Is All You Need".
         """
         half_dim = embedding_dim // 2
         emb = math.log(10000) / (half_dim - 1)
-        emb = ops.exp(ops.arange(half_dim, dtype=ms.int64).to(ms.float32) * -emb)
-        emb = ops.arange(num_embeddings, dtype=ms.int64).to(ms.float32).unsqueeze(1) * emb.unsqueeze(0)
+        emb = ops.exp(ops.arange(half_dim, dtype=mindspore.int64).float() * -emb)
+        emb = ops.arange(num_embeddings, dtype=mindspore.int64).\
+                  float().unsqueeze(1) * emb.unsqueeze(0)
         emb = ops.cat([ops.sin(emb), ops.cos(emb)], axis=1).view(num_embeddings, -1)
         if embedding_dim % 2 == 1:
             # zero pad
-            emb = ops.cat([emb, ops.zeros(num_embeddings, 1)], axis=1)
+            emb = ops.cat([emb, ops.zeros((num_embeddings, 1))], axis=1)
         if padding_idx is not None:
             emb[padding_idx, :] = 0
 
-        return emb.to(ms.float32)
+        return emb.to(mindspore.float32)
 
-    def construct(self, input_ids: ms.Tensor, past_key_values_length: int = 0):
+    def construct(self, input_ids: mindspore.Tensor, past_key_values_length: int = 0):
         bsz, seq_len = input_ids.shape
         # Create the position ids from the input token ids. Any padded tokens remain padded.
-        position_ids = self.create_position_ids_from_input_ids(input_ids, self.padding_idx, past_key_values_length)
+        position_ids = self.create_position_ids_from_input_ids(
+            input_ids, self.padding_idx, past_key_values_length)
 
         # expand embeddings if needed
         max_pos = self.padding_idx + 1 + seq_len
@@ -116,37 +117,42 @@ class TrOCRSinusoidalPositionalEmbedding(nn.Cell):
             self.weights = self.get_embedding(max_pos, self.embedding_dim, self.padding_idx)
         self.weights = self.weights.to(self._float_tensor)
 
-        x = ops.stop_gradient(self.weights.index_select(0, position_ids.view(-1)).view(bsz, seq_len, -1))
+        x = self.weights.index_select(0, position_ids.view(-1)).view(bsz, seq_len, -1).detach()
 
         return x
 
     def create_position_ids_from_input_ids(
-        self, input_ids: ms.Tensor, padding_idx: int, past_key_values_length: Optional[int] = 0
+            self, input_ids: mindspore.Tensor, padding_idx: int,
+            past_key_values_length: Optional[int] = 0
     ):
         """
-        Replace non-padding symbols with their position numbers. Position numbers begin at padding_idx+1. Padding
-        symbols are ignored. This is modified from fairseq's `utils.make_positions`.
+        Replace non-padding symbols with their position numbers.
+         Position numbers begin at padding_idx+1. Padding
+        symbols are ignored. This is modified from
+        fairseq's `utils.make_positions`.
         """
-        # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
-        mask = input_ids.ne(padding_idx).to(ms.int32)
-        incremental_indices = (ops.cumsum(mask, axis=1).to(mask.dtype) + past_key_values_length) * mask
-        return incremental_indices.to(ms.int64) + padding_idx
+        # The series of casts and type-conversions here
+        # are carefully balanced to both work with ONNX export and XLA.
+        mask = input_ids.ne(padding_idx).int()
+        incremental_indices = (ops.cumsum(mask, axis=1).
+                               type_as(mask) + past_key_values_length) * mask
+        return incremental_indices.long() + padding_idx
 
 
 class TrOCRAttention(nn.Cell):
     """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
-        self,
-        config,
-        embed_dim: int,
-        num_heads: int,
-        kdim: int = None,
-        vdim: int = None,
-        dropout: float = 0.0,
-        is_decoder: bool = False,
-        bias: bool = True,
-        is_cross_attention: bool = False,
+            self,
+            config,
+            embed_dim: int,
+            num_heads: int,
+            kdim: int = None,
+            vdim: int = None,
+            dropout: float = 0.0,
+            is_decoder: bool = False,
+            bias: bool = True,
+            is_cross_attention: bool = False,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -155,12 +161,13 @@ class TrOCRAttention(nn.Cell):
         self.num_heads = num_heads
         self.dropout = dropout
         self.head_dim = embed_dim // num_heads
-        if not (self.head_dim * num_heads == self.embed_dim):
+        if not self.head_dim * num_heads == self.embed_dim:
             raise ValueError(
-                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"
+                f"embed_dim must be divisible by num_heads"
+                f" (got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {num_heads})."
             )
-        self.scaling = self.head_dim**-0.5
+        self.scaling = self.head_dim ** -0.5
         self.is_decoder = is_decoder
 
         self.k_proj = nn.Dense(self.kdim, embed_dim, has_bias=bias)
@@ -169,18 +176,18 @@ class TrOCRAttention(nn.Cell):
 
         self.out_proj = nn.Dense(embed_dim, embed_dim, has_bias=bias)
 
-    def _shape(self, tensor: ms.Tensor, seq_len: int, bsz: int):
+    def _shape(self, tensor: mindspore.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).swapaxes(1, 2)
 
     def construct(
-        self,
-        hidden_states: ms.Tensor,
-        key_value_states: Optional[ms.Tensor] = None,
-        past_key_value: Optional[Tuple[ms.Tensor]] = None,
-        attention_mask: Optional[ms.Tensor] = None,
-        layer_head_mask: Optional[ms.Tensor] = None,
-        output_attentions: bool = False,
-    ) -> Tuple[ms.Tensor, Optional[ms.Tensor], Optional[Tuple[ms.Tensor]]]:
+            self,
+            hidden_states: mindspore.Tensor,
+            key_value_states: Optional[mindspore.Tensor] = None,
+            past_key_value: Optional[Tuple[mindspore.Tensor]] = None,
+            attention_mask: Optional[mindspore.Tensor] = None,
+            layer_head_mask: Optional[mindspore.Tensor] = None,
+            output_attentions: bool = False,
+    ) -> Tuple[mindspore.Tensor, Optional[mindspore.Tensor], Optional[Tuple[mindspore.Tensor]]]:
         """Input shape: Batch x Time x Channel"""
 
         # if key_value_states are provided this layer is used as a cross-attention layer
@@ -211,13 +218,19 @@ class TrOCRAttention(nn.Cell):
             value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
 
         if self.is_decoder:
-            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
-            # Further calls to cross_attention layer can then reuse all cross-attention
+            # if cross_attention save Tuple(mindspore.Tensor,
+            # mindspore.Tensor) of all cross attention key/value_states.
+            # Further calls to cross_attention layer
+            # can then reuse all cross-attention
             # key/value_states (first "if" case)
-            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
-            # all previous decoder key/value_states. Further calls to uni-directional self-attention
-            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
-            # if encoder bi-directional self-attention `past_key_value` is always `None`
+            # if uni-directional self-attention (decoder)
+            # save Tuple(mindspore.Tensor, mindspore.Tensor) of
+            # all previous decoder key/value_states.
+            # Further calls to uni-directional self-attention
+            # can concat previous decoder key/value_states
+            # to current projected key/value_states (third "elif" case)
+            # if encoder bi-directional self-attention
+            # `past_key_value` is always `None`
             past_key_value = (key_states, value_states)
 
         proj_shape = (bsz * self.num_heads, -1, self.head_dim)
@@ -230,14 +243,16 @@ class TrOCRAttention(nn.Cell):
 
         if attn_weights.shape != (bsz * self.num_heads, tgt_len, src_len):
             raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
+                f"Attention weights should be of size "
+                f"{(bsz * self.num_heads, tgt_len, src_len)}, but is"
                 f" {attn_weights.shape}"
             )
 
         if attention_mask is not None:
             if attention_mask.shape != (bsz, 1, tgt_len, src_len):
                 raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is {attention_mask.shape}"
+                    f"Attention mask should be of size "
+                    f"{(bsz, 1, tgt_len, src_len)}, but is {attention_mask.shape}"
                 )
             attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + attention_mask
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
@@ -250,7 +265,8 @@ class TrOCRAttention(nn.Cell):
                     f"Head mask for a single layer should be of size {(self.num_heads,)}, but is"
                     f" {layer_head_mask.shape}"
                 )
-            attn_weights = layer_head_mask.view(1, -1, 1, 1) * attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
+            attn_weights = layer_head_mask.view(1, -1, 1, 1) * \
+                           attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
         if output_attentions:
@@ -269,7 +285,8 @@ class TrOCRAttention(nn.Cell):
 
         if attn_output.shape != (bsz * self.num_heads, tgt_len, self.head_dim):
             raise ValueError(
-                f"`attn_output` should be of size {(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
+                f"`attn_output` should be of size "
+                f"{(bsz, self.num_heads, tgt_len, self.head_dim)}, but is"
                 f" {attn_output.shape}"
             )
 
@@ -283,6 +300,9 @@ class TrOCRAttention(nn.Cell):
 
 
 class TrOCRDecoderLayer(nn.Cell):
+    """
+    A class of TrOCR decoder layer.
+    """
     def __init__(self, config: TrOCRConfig):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -318,33 +338,42 @@ class TrOCRDecoderLayer(nn.Cell):
         self.final_layer_norm = nn.LayerNorm([self.embed_dim])
 
     def construct(
-        self,
-        hidden_states: ms.Tensor,
-        attention_mask: Optional[ms.Tensor] = None,
-        encoder_hidden_states: Optional[ms.Tensor] = None,
-        encoder_attention_mask: Optional[ms.Tensor] = None,
-        layer_head_mask: Optional[ms.Tensor] = None,
-        cross_attn_layer_head_mask: Optional[ms.Tensor] = None,
-        past_key_value: Optional[Tuple[ms.Tensor]] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = True,
+            self,
+            hidden_states: mindspore.Tensor,
+            attention_mask: Optional[mindspore.Tensor] = None,
+            encoder_hidden_states: Optional[mindspore.Tensor] = None,
+            encoder_attention_mask: Optional[mindspore.Tensor] = None,
+            layer_head_mask: Optional[mindspore.Tensor] = None,
+            cross_attn_layer_head_mask: Optional[mindspore.Tensor] = None,
+            past_key_value: Optional[Tuple[mindspore.Tensor]] = None,
+            output_attentions: Optional[bool] = False,
+            use_cache: Optional[bool] = True,
     ):
         """
         Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`): attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            encoder_hidden_states (`torch.FloatTensor`):
-                cross attention input to the layer of shape `(batch, seq_len, embed_dim)`
-            encoder_attention_mask (`torch.FloatTensor`): encoder attention mask of size
-                `(batch, 1, tgt_len, src_len)` where padding elements are indicated by very large negative values.
-            layer_head_mask (`torch.FloatTensor`): mask for attention heads in a given layer of size
+            hidden_states (`mindspore.Tensor`):
+                input to the layer of shape `(batch, seq_len, embed_dim)`
+            attention_mask (`mindspore.Tensor`): attention mask of size
+                `(batch, 1, tgt_len, src_len)` where
+                padding elements are indicated by very large negative values.
+            encoder_hidden_states (`mindspore.Tensor`):
+                cross attention input to the layer of
+                shape `(batch, seq_len, embed_dim)`
+            encoder_attention_mask (`mindspore.Tensor`): encoder attention
+                mask of size
+                `(batch, 1, tgt_len, src_len)` where padding
+                 elements are indicated by very large negative values.
+            layer_head_mask (`mindspore.Tensor`): mask for
+                attention heads in a given layer of size
                 `(encoder_attention_heads,)`.
-            cross_attn_layer_head_mask (`torch.FloatTensor`): mask for cross-attention heads in a given layer of
+            cross_attn_layer_head_mask (`mindspore.Tensor`): mask for
+                cross-attention heads in a given layer of
                 size *(decoder_attention_heads,)*.
-            past_key_value (`Tuple(torch.FloatTensor)`): cached past key and value projection states
+            past_key_value (`Tuple(mindspore.Tensor)`):
+                cached past key and value projection states
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                Whether or not to return the attentions tensors of
+                all attention layers. See `attentions` under
                 returned tensors for more detail.
         """
         residual = hidden_states
@@ -393,7 +422,8 @@ class TrOCRDecoderLayer(nn.Cell):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.activation_fn(self.fc1(hidden_states))
-        hidden_states = ops.dropout(hidden_states, p=self.activation_dropout, training=self.training)
+        hidden_states = ops.dropout(hidden_states,
+                                    p=self.activation_dropout, training=self.training)
         hidden_states = self.fc2(hidden_states)
 
         hidden_states = ops.dropout(hidden_states, p=self.dropout, training=self.training)
@@ -420,20 +450,21 @@ class TrOCRPreTrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         std = self.config.init_std
         if isinstance(module, (nn.Dense, nn.Conv1d)):
-            module.weight.set_data(initializer(Normal(std), module.weight.shape, module.weight.dtype))
+            module.weight.set_data(initializer(
+                Normal(sigma=std, mean=0.0), module.weight.shape, module.weight.dtype))
             if module.has_bias:
                 module.bias.set_data(initializer('zeros', module.bias.shape, module.bias.dtype))
         elif isinstance(module, nn.Embedding):
-            weight = np.random.normal(0.0, std, module.weight.shape)
-            if module.padding_idx:
-                weight[module.padding_idx] = 0
-            module.weight.set_data(ms.Tensor(weight, module.weight.dtype))
-
+            emb_weight = np.random.normal(0, std, module.weight.shape)
+            if module.padding_idx is not None:
+                emb_weight[module.padding_idx] = 0
+            module.weight.set_data(mindspore.Tensor(emb_weight, module.weight.dtype))
 
 
 class TrOCRDecoder(TrOCRPreTrainedModel):
     """
-    Transformer decoder consisting of *config.decoder_layers* layers. Each layer is a [`TrOCRDecoderLayer`]
+    Transformer decoder consisting of *config.decoder_layers*
+    layers. Each layer is a [`TrOCRDecoderLayer`]
 
     Args:
         config: TrOCRConfig
@@ -451,7 +482,8 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
         )
 
         if config.use_learned_position_embeddings:
-            self.embed_positions = TrOCRLearnedPositionalEmbedding(config.max_position_embeddings, config.hidden_size)
+            self.embed_positions = TrOCRLearnedPositionalEmbedding(
+                config.max_position_embeddings, config.hidden_size)
         else:
             self.embed_positions = TrOCRSinusoidalPositionalEmbedding(
                 config.max_position_embeddings + self.padding_idx + 1,
@@ -477,95 +509,125 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
         self.embed_tokens = value
 
     def construct(
-        self,
-        input_ids=None,
-        attention_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        head_mask=None,
-        cross_attn_head_mask=None,
-        past_key_values=None,
-        inputs_embeds=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
+            self,
+            input_ids=None,
+            attention_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            head_mask=None,
+            cross_attn_head_mask=None,
+            past_key_values=None,
+            inputs_embeds=None,
+            use_cache=None,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
     ):
         r"""
         Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
+            input_ids (`mindspore.Tensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary.
+                 Padding will be ignored by default should you
                 provide it.
 
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
+                Indices can be obtained using [`AutoTokenizer`].
+                See [`PreTrainedTokenizer.encode`] and
                 [`PreTrainedTokenizer.__call__`] for details.
 
                 [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+            attention_mask (`mindspore.Tensor` of shape
+            `(batch_size, sequence_length)`, *optional*):
+                Mask to avoid performing attention on padding token
+                indices. Mask values selected in `[0, 1]`:
 
                 - 1 for tokens that are **not masked**,
                 - 0 for tokens that are **masked**.
 
                 [What are attention masks?](../glossary#attention-mask)
-            encoder_hidden_states (`torch.FloatTensor` of shape `(batch_size, encoder_sequence_length, hidden_size)`, *optional*):
-                Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention
+            encoder_hidden_states
+            (`mindspore.Tensor` of shape `(batch_size,
+            encoder_sequence_length, hidden_size)`, *optional*):
+                Sequence of hidden-states at the output of the last
+                 layer of the encoder. Used in the cross-attention
                 of the decoder.
-            encoder_attention_mask (`torch.LongTensor` of shape `(batch_size, encoder_sequence_length)`, *optional*):
-                Mask to avoid performing cross-attention on padding tokens indices of encoder input_ids. Mask values
+            encoder_attention_mask (`mindspore.Tensor` of
+            shape `(batch_size, encoder_sequence_length)`, *optional*):
+                Mask to avoid performing cross-attention on padding
+                 tokens indices of encoder input_ids. Mask values
                 selected in `[0, 1]`:
 
                 - 1 for tokens that are **not masked**,
                 - 0 for tokens that are **masked**.
 
                 [What are attention masks?](../glossary#attention-mask)
-            head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
+            head_mask (`mindspore.Tensor` of shape
+            `(decoder_layers, decoder_attention_heads)`, *optional*):
+                Mask to nullify selected heads of the attention
+                modules. Mask values selected in `[0, 1]`:
 
                 - 1 indicates the head is **not masked**,
                 - 0 indicates the head is **masked**.
 
-            cross_attn_head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules in encoder to avoid performing cross-attention
+            cross_attn_head_mask (`mindspore.Tensor` of shape
+            `(decoder_layers, decoder_attention_heads)`, *optional*):
+                Mask to nullify selected heads of the attention
+                modules in encoder to avoid performing cross-attention
                 on hidden heads. Mask values selected in `[0, 1]`:
 
                 - 1 indicates the head is **not masked**,
                 - 0 indicates the head is **masked**.
 
-            past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
-                shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
+            past_key_values (`tuple(tuple(mindspore.Tensor))`, *optional*,
+            returned when `use_cache=True` is passed or when `config.use_cache=True`):
+                Tuple of `tuple(mindspore.Tensor)` of length
+                `config.n_layers`, with each tuple having 2 tensors of
+                shape `(batch_size, num_heads, sequence_length,
+                embed_size_per_head)`) and 2 additional tensors of
+                shape `(batch_size, num_heads, encoder_sequence_length,
+                 embed_size_per_head)`.
 
-                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the
-                cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
+                Contains pre-computed hidden-states (key and values in
+                 the self-attention blocks and in the
+                cross-attention blocks) that can be used (see
+                `past_key_values` input) to speed up sequential decoding.
 
-                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
-                that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
+                If `past_key_values` are used, the user can optionally
+                 input only the last `decoder_input_ids` (those
+                that don't have their past key value states given to
+                this model) of shape `(batch_size, 1)` instead of
                 all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-            inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
-                This is useful if you want more control over how to convert `input_ids` indices into associated vectors
+            inputs_embeds (`mindspore.Tensor` of shape
+            `(batch_size, sequence_length, hidden_size)`, *optional*):
+                Optionally, instead of passing `input_ids` you can
+                choose to directly pass an embedded representation.
+                This is useful if you want more control over how to
+                convert `input_ids` indices into associated vectors
                 than the model's internal embedding lookup matrix.
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                Whether or not to return the attentions tensors of
+                all attention layers. See `attentions` under
                 returned tensors for more detail.
             output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
+                Whether or not to return the hidden states of all
+                layers. See `hidden_states` under returned tensors
                 for more detail.
             return_dict (`bool`, *optional*):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+                Whether or not to return a [`~utils.ModelOutput`]
+                instead of a plain tuple.
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = output_attentions if output_attentions\
+                                                 is not None else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+            raise ValueError("You cannot specify both decoder_input_ids"
+                             " and decoder_inputs_embeds at the same time")
         elif input_ids is not None:
             input = input_ids
             input_ids = input_ids.view(-1, input.shape[-1])
@@ -573,10 +635,12 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
             input_shape = inputs_embeds.shape[:-1]
             input = inputs_embeds[:, :, -1]
         else:
-            raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+            raise ValueError("You have to specify "
+                             "either decoder_input_ids or decoder_inputs_embeds")
 
         # past_key_values_length
-        past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
+        past_key_values_length = past_key_values[0][0].shape[2]\
+            if past_key_values is not None else 0
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
@@ -584,7 +648,8 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
         if self.config.use_learned_position_embeddings:
             embed_pos = self.embed_positions(input, past_key_values_length=past_key_values_length)
         else:
-            embed_pos = self.embed_positions(input_ids, past_key_values_length=past_key_values_length)
+            embed_pos = self.embed_positions(input_ids,
+                                             past_key_values_length=past_key_values_length)
 
         hidden_states = inputs_embeds + embed_pos
 
@@ -608,23 +673,28 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
-                logger.warning_once(
-                    "`use_cache = True` is incompatible with gradient checkpointing. Setting `use_cache = False`..."
+                logger.warning(
+                    "`use_cache = True` is incompatible with "
+                    "gradient checkpointing. Setting `use_cache = False`..."
                 )
                 use_cache = False
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        all_cross_attentions = () if (output_attentions and encoder_hidden_states is not None) else None
+        all_cross_attentions = () if (output_attentions and encoder_hidden_states
+                                      is not None) else None
         next_decoder_cache = () if use_cache else None
 
-        # check if head_mask/cross_attn_head_mask has a correct number of layers specified if desired
-        for attn_mask, mask_name in zip([head_mask, cross_attn_head_mask], ["head_mask", "cross_attn_head_mask"]):
+        # check if head_mask/cross_attn_head_mask has a correct
+        # number of layers specified if desired
+        for attn_mask, mask_name in zip([head_mask, cross_attn_head_mask],
+                                        ["head_mask", "cross_attn_head_mask"]):
             if attn_mask is not None:
                 if attn_mask.shape[0] != (len(self.layers)):
                     raise ValueError(
-                        f"The `{mask_name}` should be specified for {len(self.layers)} layers, but it is for"
+                        f"The `{mask_name}` should be specified for {len(self.layers)} "
+                        f"layers, but it is for"
                         f" {head_mask.shape[0]}."
                     )
         for idx, decoder_layer in enumerate(self.layers):
@@ -632,7 +702,7 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
             if self.training:
-                dropout_probability = ops.rand([])
+                dropout_probability = ops.rand(1)
                 if dropout_probability < self.layerdrop:
                     continue
 
@@ -684,7 +754,8 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
         if not return_dict:
             return tuple(
                 v
-                for v in [hidden_states, next_cache, all_hidden_states, all_self_attns, all_cross_attentions]
+                for v in [hidden_states, next_cache,
+                          all_hidden_states, all_self_attns, all_cross_attentions]
                 if v is not None
             )
         return BaseModelOutputWithPastAndCrossAttentions(
@@ -698,7 +769,26 @@ class TrOCRDecoder(TrOCRPreTrainedModel):
 
 class TrOCRDecoderWrapper(TrOCRPreTrainedModel):
     """
-    This wrapper class is a helper class to correctly load pretrained checkpoints when the causal language model is
+    The TrOCR Model with a language modeling head.
+    Can be used for summarization.
+
+    This model inherits from [`PreTrainedModel`].
+    Check the superclass documentation for the generic methods the
+    library implements for all its model (such as downloading or
+    saving, resizing the input embeddings, pruning heads
+    etc.)
+
+    Parameters:
+        config ([`TrOCRConfig`]):
+            Model configuration class with all the parameters of the model.
+             Initializing with a config file does not
+            load the weights associated with the model,
+            only the configuration. Check out the
+            [`~PreTrainedModel.from_pretrained`] method
+            to load the model weights.
+
+    This wrapper class is a helper class to correctly load pretrained
+    checkpoints when the causal language model is
     used in combination with the [`EncoderDecoderModel`] framework.
     """
 
@@ -711,6 +801,26 @@ class TrOCRDecoderWrapper(TrOCRPreTrainedModel):
 
 
 class TrOCRForCausalLM(TrOCRPreTrainedModel):
+    """
+    The TrOCR Decoder with a language modeling head.
+    Can be used as the decoder part of [`EncoderDecoderModel`] and
+    [`VisionEncoderDecoder`].
+
+    This model inherits from [`PreTrainedModel`].
+    Check the superclass documentation for the generic methods the
+    library implements for all its model (such as downloading or saving,
+     resizing the input embeddings, pruning heads
+    etc.)
+
+    Parameters:
+        config ([`TrOCRConfig`]):
+            Model configuration class with all the parameters of the model.
+            Initializing with a config file does not
+            load the weights associated with the model,
+            only the configuration. Check out the
+            [`~PreTrainedModel.from_pretrained`] method
+            to load the model weights.
+    """
     _tied_weights_keys = ["output_projection.weight"]
 
     def __init__(self, config):
@@ -744,140 +854,118 @@ class TrOCRForCausalLM(TrOCRPreTrainedModel):
         return self.model.decoder
 
     def construct(
-        self,
-        input_ids: Optional[ms.Tensor] = None,
-        attention_mask: Optional[ms.Tensor] = None,
-        encoder_hidden_states: Optional[ms.Tensor] = None,
-        encoder_attention_mask: Optional[ms.Tensor] = None,
-        head_mask: Optional[ms.Tensor] = None,
-        cross_attn_head_mask: Optional[ms.Tensor] = None,
-        past_key_values: Optional[Tuple[Tuple[ms.Tensor]]] = None,
-        inputs_embeds: Optional[ms.Tensor] = None,
-        labels: Optional[ms.Tensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            input_ids: Optional[mindspore.Tensor] = None,
+            attention_mask: Optional[mindspore.Tensor] = None,
+            encoder_hidden_states: Optional[mindspore.Tensor] = None,
+            encoder_attention_mask: Optional[mindspore.Tensor] = None,
+            head_mask: Optional[mindspore.Tensor] = None,
+            cross_attn_head_mask: Optional[mindspore.Tensor] = None,
+            past_key_values: Optional[Tuple[Tuple[mindspore.Tensor]]] = None,
+            inputs_embeds: Optional[mindspore.Tensor] = None,
+            labels: Optional[mindspore.Tensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithCrossAttentions]:
         r"""
         Args:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                Indices of input sequence tokens in the vocabulary. Padding will be ignored by default should you
-                provide it.
+            input_ids (`mindspore.Tensor` of shape `(batch_size, sequence_length)`):
+                Indices of input sequence tokens in the vocabulary. Padding will be
+                ignored by default should you provide it.
 
-                Indices can be obtained using [`AutoTokenizer`]. See [`PreTrainedTokenizer.encode`] and
-                [`PreTrainedTokenizer.__call__`] for details.
+                Indices can be obtained using [`AutoTokenizer`].
+                See [`PreTrainedTokenizer.encode`]
+                and [`PreTrainedTokenizer.__call__`] for details.
 
                 [What are input IDs?](../glossary#input-ids)
-            attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+            attention_mask (`mindspore.Tensor` of shape
+            `(batch_size, sequence_length)`, *optional*):
+                Mask to avoid performing attention on padding token indices.
+                Mask values selected in `[0, 1]`:
 
                 - 1 for tokens that are **not masked**,
                 - 0 for tokens that are **masked**.
 
                 [What are attention masks?](../glossary#attention-mask)
-            encoder_hidden_states  (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
-                Sequence of hidden-states at the output of the last layer of the encoder. Used in the cross-attention
-                if the model is configured as a decoder.
-            encoder_attention_mask (`torch.FloatTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Mask to avoid performing attention on the padding token indices of the encoder input. This mask is used
-                in the cross-attention if the model is configured as a decoder. Mask values selected in `[0, 1]`:
-            head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the attention modules. Mask values selected in `[0, 1]`:
+            encoder_hidden_states
+            (`mindspore.Tensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
+                Sequence of hidden-states at the output of the last layer of the encoder.
+                Used in the cross-attention if the model is configured as a decoder.
+            encoder_attention_mask (`mindspore.Tensor` of
+            shape `(batch_size, sequence_length)`, *optional*):
+                Mask to avoid performing attention on the padding token
+                indices of the encoder input. This mask is used
+                in the cross-attention if the model is configured
+                 as a decoder. Mask values selected in `[0, 1]`:
+            head_mask (`mindspore.Tensor` of shape `(decoder_layers,
+            decoder_attention_heads)`, *optional*):
+                Mask to nullify selected heads of the attention modules.
+                 Mask values selected in `[0, 1]`:
 
                 - 1 indicates the head is **not masked**,
                 - 0 indicates the head is **masked**.
 
-            cross_attn_head_mask (`torch.Tensor` of shape `(decoder_layers, decoder_attention_heads)`, *optional*):
-                Mask to nullify selected heads of the cross-attention modules. Mask values selected in `[0, 1]`:
+            cross_attn_head_mask (`mindspore.Tensor` of shape
+            `(decoder_layers, decoder_attention_heads)`, *optional*):
+                Mask to nullify selected heads of the cross-attention modules.
+                Mask values selected in `[0, 1]`:
 
                 - 1 indicates the head is **not masked**,
                 - 0 indicates the head is **masked**.
 
-            past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-                Tuple of `tuple(torch.FloatTensor)` of length `config.n_layers`, with each tuple having 2 tensors of
-                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`) and 2 additional tensors of
-                shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`. The two additional
-                tensors are only required when the model is used as a decoder in a Sequence to Sequence model.
+            past_key_values (`tuple(tuple(mindspore.Tensor))`, *optional*,
+            returned when `use_cache=True` is passed or when `config.use_cache=True`):
+                Tuple of `tuple(mindspore.Tensor)` of length `config.n_layers`,
+                with each tuple having 2 tensors of
+                shape `(batch_size, num_heads, sequence_length, embed_size_per_head)`)
+                and 2 additional tensors of
+                shape `(batch_size, num_heads, encoder_sequence_length, embed_size_per_head)`.
+                 The two additional
+                tensors are only required when the model is used as a
+                decoder in a Sequence to Sequence model.
 
-                Contains pre-computed hidden-states (key and values in the self-attention blocks and in the
-                cross-attention blocks) that can be used (see `past_key_values` input) to speed up sequential decoding.
+                Contains pre-computed hidden-states (key and values in
+                the self-attention blocks and in the
+                cross-attention blocks) that can be used (see `past_key_values` input)
+                to speed up sequential decoding.
 
-                If `past_key_values` are used, the user can optionally input only the last `decoder_input_ids` (those
-                that don't have their past key value states given to this model) of shape `(batch_size, 1)` instead of
+                If `past_key_values` are used, the user can optionally input
+                 only the last `decoder_input_ids` (those
+                that don't have their past key value states given to this model)
+                 of shape `(batch_size, 1)` instead of
                 all `decoder_input_ids` of shape `(batch_size, sequence_length)`.
-            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
-                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
-                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
-                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+            labels (`mindspore.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for computing the masked language modeling loss.
+                Indices should either be in `[0, ...,
+                config.vocab_size]` or -100 (see `input_ids` docstring).
+                 Tokens with indices set to `-100` are ignored
+                (masked), the loss is only computed for the tokens with labels
+                in `[0, ..., config.vocab_size]`.
             use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
+                If set to `True`, `past_key_values` key value states are returned and
+                can be used to speed up decoding (see `past_key_values`).
 
                 - 1 for tokens that are **not masked**,
                 - 0 for tokens that are **masked**.
             output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
+                Whether or not to return the attentions tensors of all attention layers.
+                See `attentions` under returned tensors for more detail.
             output_hidden_states (`bool`, *optional*):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more detail.
+                Whether or not to return the hidden states of all layers. See `hidden_states`
+                under returned tensors for more detail.
             return_dict (`bool`, *optional*):
                 Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
 
         Returns:
-
-        Example:
-
-        ```python
-        >>> from transformers import (
-        ...     TrOCRConfig,
-        ...     TrOCRProcessor,
-        ...     TrOCRForCausalLM,
-        ...     ViTConfig,
-        ...     ViTModel,
-        ...     VisionEncoderDecoderModel,
-        ... )
-        >>> import requests
-        >>> from PIL import Image
-
-        >>> # TrOCR is a decoder model and should be used within a VisionEncoderDecoderModel
-        >>> # init vision2text model with random weights
-        >>> encoder = ViTModel(ViTConfig())
-        >>> decoder = TrOCRForCausalLM(TrOCRConfig())
-        >>> model = VisionEncoderDecoderModel(encoder=encoder, decoder=decoder)
-
-        >>> # If you want to start from the pretrained model, load the checkpoint with `VisionEncoderDecoderModel`
-        >>> processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
-        >>> model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
-
-        >>> # load image from the IAM dataset
-        >>> url = "https://fki.tic.heia-fr.ch/static/img/a01-122-02.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw).convert("RGB")
-        >>> pixel_values = processor(image, return_tensors="pt").pixel_values
-        >>> text = "industry, ' Mr. Brown commented icily. ' Let us have a"
-
-        >>> # training
-        >>> model.config.decoder_start_token_id = processor.tokenizer.eos_token_id
-        >>> model.config.pad_token_id = processor.tokenizer.pad_token_id
-        >>> model.config.vocab_size = model.config.decoder.vocab_size
-
-        >>> labels = processor.tokenizer(text, return_tensors="pt").input_ids
-        >>> outputs = model(pixel_values, labels=labels)
-        >>> loss = outputs.loss
-        >>> round(loss.item(), 2)
-        5.30
-
-        >>> # inference
-        >>> generated_ids = model.generate(pixel_values)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        >>> generated_text
-        'industry, " Mr. Brown commented icily. " Let us have a'
-        ```"""
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+            mindnlp.transformers.modeling_outputs.CausalLMOutputWithCrossAttentions
+        """
+        output_attentions = output_attentions if output_attentions is not None \
+            else self.config.output_attentions
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -901,7 +989,7 @@ class TrOCRForCausalLM(TrOCRPreTrainedModel):
 
         loss = None
         if labels is not None:
-            loss = ops.cross_entropy(logits.view(-1, self.config.vocab_size), labels.view(-1))
+            loss = cross_entropy(logits.view(-1, self.config.vocab_size), labels.view(-1))
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -917,9 +1005,11 @@ class TrOCRForCausalLM(TrOCRPreTrainedModel):
         )
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, use_cache=None, **kwargs
+            self, input_ids, past_key_values=None,
+            attention_mask=None, use_cache=None, **kwargs
     ):
-        # if model is used as a decoder in encoder-decoder model, the decoder attention mask is created on the fly
+        # if model is used as a decoder in encoder-decoder model,
+        # the decoder attention mask is created on the fly
         if attention_mask is None:
             attention_mask = input_ids.new_ones(input_ids.shape)
 
@@ -953,6 +1043,7 @@ class TrOCRForCausalLM(TrOCRPreTrainedModel):
 
 
 __all__ = [
-    "TrOCRForCausalLM",
-    "TrOCRPreTrainedModel",
+    'TrOCRDecoder',
+    'TrOCRPreTrainedModel',
+    'TrOCRForCausalLM',
 ]

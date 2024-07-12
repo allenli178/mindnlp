@@ -18,7 +18,6 @@ from typing import Dict, List, Optional, Union
 
 import numpy as np
 
-from mindnlp.configs import IMAGENET_STANDARD_MEAN, IMAGENET_STANDARD_STD
 from ...image_processing_utils import BaseImageProcessor, BatchFeature, get_size_dict
 from ...image_transforms import (
     get_resize_output_image_size,
@@ -26,6 +25,7 @@ from ...image_transforms import (
     resize,
     to_channel_dimension_format,
 )
+from ....configs import OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 from ...image_utils import (
     ChannelDimension,
     ImageInput,
@@ -39,8 +39,7 @@ from ...image_utils import (
     validate_kwargs,
     validate_preprocess_arguments,
 )
-from ....utils import TensorType, logging
-from ....utils.import_utils import is_vision_available
+from ....utils import TensorType, logging, is_vision_available
 
 
 logger = logging.get_logger(__name__)
@@ -121,8 +120,8 @@ class DonutImageProcessor(BaseImageProcessor):
         self.do_rescale = do_rescale
         self.rescale_factor = rescale_factor
         self.do_normalize = do_normalize
-        self.image_mean = image_mean if image_mean is not None else IMAGENET_STANDARD_MEAN
-        self.image_std = image_std if image_std is not None else IMAGENET_STANDARD_STD
+        self.image_mean = image_mean if image_mean is not None else OPENAI_CLIP_MEAN
+        self.image_std = image_std if image_std is not None else OPENAI_CLIP_STD
         self._valid_processor_keys = [
             "images",
             "do_resize",
@@ -478,7 +477,4 @@ class DonutImageProcessor(BaseImageProcessor):
         data = {"pixel_values": images}
         return BatchFeature(data=data, tensor_type=return_tensors)
 
-
-__all__ = [
-    "DonutImageProcessor"
-]
+__all__ = ['DonutImageProcessor']

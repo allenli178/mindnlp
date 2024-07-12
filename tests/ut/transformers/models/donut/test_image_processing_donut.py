@@ -26,6 +26,7 @@ from ...test_image_processing_common import ImageProcessingTestMixin, prepare_im
 
 if is_mindspore_available():
     import mindspore as ms
+    from mindspore import ops
 
 if is_vision_available():
     from PIL import Image
@@ -194,11 +195,13 @@ class DonutImageProcessingTest(ImageProcessingTestMixin, unittest.TestCase):
             ),
         )
 
+
+    #TODO
     @is_flaky()
-    def test_call_pytorch(self):
+    def test_call_mindspore(self):
         # Initialize image_processing
         image_processing = self.image_processing_class(**self.image_processor_dict)
-        # create random Mindspore tensors
+        # create random mindspore tensors
         image_inputs = self.image_processor_tester.prepare_image_inputs(equal_resolution=False, torchify=True)
         for image in image_inputs:
             self.assertIsInstance(image, ms.Tensor)
